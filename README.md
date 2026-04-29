@@ -9,6 +9,8 @@ A Claude Code skill that executes on-chain orders on the **Gametoken orderbook**
 
 > ⚠️ **This skill signs and broadcasts real transactions with the private key you provide.** Test with small amounts. Set `MAX_TRADE_CROSS` in `.env`. Read `skills/cross-dex-trade/scripts/trade.mjs` before using.
 
+> 🔒 **Private repository.** Owner (`to-nexus`) installs via `gh auth login`. Others need collaborator access or `GITHUB_TOKEN`. See the umbrella [`cross-skills-suite` README](https://github.com/to-nexus/cross-skills-suite#authenticating-to-private-repos) for details.
+
 ---
 
 ## Install — Recommended (via Marketplace)
