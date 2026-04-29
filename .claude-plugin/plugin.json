@@ -1,0 +1,16 @@
+{
+  "name": "cross-dex-trade",
+  "description": "CROSS Chain (id 612055) Gametoken orderbook DEX trading via EOA + viem. Optionally dispatched through an OpenClaw agent. Bundles a Node.js trader, SOUL.md template, and credential-handling rules.",
+  "author": {
+    "name": "to-nexus"
+  },
+  "homepage": "https://github.com/to-nexus/skill-cross-dex-trade",
+  "keywords": [
+    "cross-chain",
+    "dex",
+    "gametoken",
+    "openclaw",
+    "evm",
+    "trading"
+  ]
+}
