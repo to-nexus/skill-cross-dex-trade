@@ -5,12 +5,16 @@
 // Usage (env: PRIVATE_KEY required, optional CROSS_RPC_URL, MAX_TRADE_CROSS, WALLET_ADDRESS):
 //   node trade.mjs pairs
 //   node trade.mjs balance
-//   node trade.mjs buy    <SYMBOL> <PRICE_CROSS> <AMOUNT_TOKEN>
-//   node trade.mjs sell   <SYMBOL> <PRICE_CROSS> <AMOUNT_TOKEN>
-//   node trade.mjs cancel <SYMBOL> <ORDER_ID>
+//   node trade.mjs buy        <SYMBOL> <PRICE_CROSS> <AMOUNT_TOKEN>
+//   node trade.mjs sell       <SYMBOL> <PRICE_CROSS> <AMOUNT_TOKEN>
+//   node trade.mjs market-buy <SYMBOL> <CROSS_SPEND>
+//   node trade.mjs cancel     <SYMBOL> <ORDER_ID>
 //
 // Output is one JSON object per invocation on stdout. Errors go to stderr with
-// a non-zero exit code.
+// a non-zero exit code. Buy / sell / market-buy emit a `fillState` block
+// derived from pre/post balance diffs so callers can distinguish a tx whose
+// receipt was `success` but whose order remained open (lot/price out of range)
+// from one that actually filled.
 
 import {
   createPublicClient,
@@ -41,6 +45,9 @@ const SELECTORS = {
   BUY: "0xeafff4e0",
   SELL: "0x349ed71f",
   CANCEL: "0x1ec482d7",
+  // submitBuyMarket(address pair, uint256 spendAmount, uint256 maxMatchCount)
+  // Computed via keccak256; surfaced from the live Gametoken router bundle.
+  BUY_MARKET: "0x1e920084",
 };
 const MAX_MATCH = 50n;
 const MAX_UINT256 = (1n << 256n) - 1n;
@@ -78,6 +85,79 @@ function buildCancelCalldata(pair, orderId) {
     + pad256(64n)
     + pad256(1n)
     + pad256(BigInt(orderId)));
+}
+
+function buildMarketBuyCalldata(pair, spendWei, maxMatch = MAX_MATCH) {
+  return (SELECTORS.BUY_MARKET
+    + padAddress(pair)
+    + pad256(spendWei)
+    + pad256(maxMatch));
+}
+
+// Reject amounts that violate the pair's lot_size — the on-chain matcher
+// reverts at gas estimation, so catching it here gives a clean error instead
+// of an opaque estimateGas failure.
+function assertLotMultiple(amountStr, lotSize) {
+  if (!lotSize || lotSize === "0") return;
+  const amount = parseEther(amountStr);
+  const lot = parseEther(lotSize);
+  if (lot === 0n) return;
+  if (amount % lot !== 0n) {
+    fail(
+      `amount ${amountStr} is not a multiple of pair lot_size ${lotSize}.`,
+      { hint: `round to nearest multiple of ${lotSize}` }
+    );
+  }
+}
+
+// Read native + base-token balances for an account, in one shot.
+async function snapshotBalances(publicClient, address, baseTokenAddress) {
+  const [native, base] = await Promise.all([
+    publicClient.getBalance({ address }),
+    publicClient.readContract({
+      address: baseTokenAddress, abi: ERC20_ABI, functionName: "balanceOf", args: [address],
+    }),
+  ]);
+  return { native, base };
+}
+
+// Derive a fill-state block from pre/post balance diffs.
+//   side: "buy" | "market-buy" | "sell"
+//   requestedAmount (wei): for buy/sell — the submitted token amount
+//   requestedSpend (wei):  for market-buy — the CROSS spend
+//   gasCost (wei):         gasUsed * effectiveGasPrice from the receipt
+function computeFillState({ side, before, after, requestedAmount, requestedSpend, gasCost }) {
+  const baseDelta = after.base - before.base;            // + for buy fills
+  const nativeDelta = before.native - after.native;       // + for native spent
+  const nativeSpentNet = nativeDelta - gasCost;            // exclude gas
+  if (side === "buy" || side === "market-buy") {
+    const filled = baseDelta;
+    let openRemainder = 0n;
+    let fillState;
+    if (filled === 0n) fillState = "open";
+    else if (side === "buy" && filled < requestedAmount) { fillState = "partial"; openRemainder = requestedAmount - filled; }
+    else if (side === "buy" && filled === requestedAmount) fillState = "filled";
+    else if (side === "market-buy") fillState = nativeSpentNet < requestedSpend ? "partial" : "filled";
+    else fillState = "filled";
+    return {
+      fillState,
+      filledTokens: formatEther(filled),
+      openRemainder: formatEther(openRemainder),
+      nativeSpentNetCROSS: formatEther(nativeSpentNet < 0n ? 0n : nativeSpentNet),
+      nativeRefundedCROSS: side === "market-buy"
+        ? formatEther(requestedSpend - nativeSpentNet > 0n ? requestedSpend - nativeSpentNet : 0n)
+        : null,
+    };
+  }
+  // sell: tokens leave the wallet on order placement; CROSS arrives only on
+  // matched fills. We surface diffs without claiming filled vs open since the
+  // DEX may hold unmatched tokens in the order book under either outcome.
+  return {
+    fillState: null,
+    tokensTransferredOut: formatEther(before.base - after.base),
+    nativeReceivedNetCROSS: formatEther(after.native - before.native + gasCost),
+    note: "for sell, tokens leaving the wallet does not by itself imply a fill — check open-orders to disambiguate",
+  };
 }
 
 function getPrivateKey() {
@@ -181,6 +261,7 @@ async function cmdBalance() {
 
 async function cmdBuy(symbol, priceStr, amountStr) {
   const pair = await findPair(symbol);
+  assertLotMultiple(amountStr, pair.lotSize);
   const price = parseEther(priceStr);
   const amount = parseEther(amountStr);
   const totalCost = (price * amount) / parseEther("1");
@@ -189,9 +270,9 @@ async function cmdBuy(symbol, priceStr, amountStr) {
   const { account, publicClient, walletClient } = makeClients();
   await ensureChainId(publicClient);
 
-  const native = await publicClient.getBalance({ address: account.address });
-  if (native < totalCost) {
-    fail(`CROSS balance ${formatEther(native)} < required ${formatEther(totalCost)}.`);
+  const before = await snapshotBalances(publicClient, account.address, pair.baseAddress);
+  if (before.native < totalCost) {
+    fail(`CROSS balance ${formatEther(before.native)} < required ${formatEther(totalCost)}.`);
   }
 
   const data = buildOrderCalldata(SELECTORS.BUY, pair.pairAddress, price, amount);
@@ -202,6 +283,11 @@ async function cmdBuy(symbol, priceStr, amountStr) {
     to: DEX_CONTRACT, data, value: totalCost, gas: (gas * 120n) / 100n,
   });
   const receipt = await publicClient.waitForTransactionReceipt({ hash });
+  const after = await snapshotBalances(publicClient, account.address, pair.baseAddress);
+  const gasCost = (receipt.gasUsed ?? 0n) * (receipt.effectiveGasPrice ?? 0n);
+  const fill = receipt.status === "success"
+    ? computeFillState({ side: "buy", before, after, requestedAmount: amount, gasCost })
+    : { fillState: "reverted", filledTokens: "0", openRemainder: amountStr, nativeSpentNetCROSS: "0", nativeRefundedCROSS: null };
   console.log(JSON.stringify({
     action: "buy",
     symbol: pair.baseSymbol,
@@ -212,11 +298,52 @@ async function cmdBuy(symbol, priceStr, amountStr) {
     txHash: hash,
     status: receipt.status,
     explorer: EXPLORER_TX(hash),
+    fill,
+  }, null, 2));
+}
+
+async function cmdMarketBuy(symbol, spendStr) {
+  const pair = await findPair(symbol);
+  const spend = parseEther(spendStr);
+  if (spend <= 0n) fail(`spend amount must be positive (got "${spendStr}")`);
+  checkSafetyCap(spendStr);
+
+  const { account, publicClient, walletClient } = makeClients();
+  await ensureChainId(publicClient);
+
+  const before = await snapshotBalances(publicClient, account.address, pair.baseAddress);
+  if (before.native < spend) {
+    fail(`CROSS balance ${formatEther(before.native)} < spend ${spendStr}.`);
+  }
+
+  const data = buildMarketBuyCalldata(pair.pairAddress, spend);
+  const gas = await publicClient.estimateGas({
+    account: account.address, to: DEX_CONTRACT, data, value: spend,
+  });
+  const hash = await walletClient.sendTransaction({
+    to: DEX_CONTRACT, data, value: spend, gas: (gas * 120n) / 100n,
+  });
+  const receipt = await publicClient.waitForTransactionReceipt({ hash });
+  const after = await snapshotBalances(publicClient, account.address, pair.baseAddress);
+  const gasCost = (receipt.gasUsed ?? 0n) * (receipt.effectiveGasPrice ?? 0n);
+  const fill = receipt.status === "success"
+    ? computeFillState({ side: "market-buy", before, after, requestedSpend: spend, gasCost })
+    : { fillState: "reverted", filledTokens: "0", openRemainder: "0", nativeSpentNetCROSS: "0", nativeRefundedCROSS: spendStr };
+  console.log(JSON.stringify({
+    action: "market-buy",
+    symbol: pair.baseSymbol,
+    spendCROSS: spendStr,
+    address: account.address,
+    txHash: hash,
+    status: receipt.status,
+    explorer: EXPLORER_TX(hash),
+    fill,
   }, null, 2));
 }
 
 async function cmdSell(symbol, priceStr, amountStr) {
   const pair = await findPair(symbol);
+  assertLotMultiple(amountStr, pair.lotSize);
   const price = parseEther(priceStr);
   const amount = parseEther(amountStr);
   const totalProceeds = (price * amount) / parseEther("1");
@@ -225,11 +352,9 @@ async function cmdSell(symbol, priceStr, amountStr) {
   const { account, publicClient, walletClient } = makeClients();
   await ensureChainId(publicClient);
 
-  const tokenBal = await publicClient.readContract({
-    address: pair.baseAddress, abi: ERC20_ABI, functionName: "balanceOf", args: [account.address],
-  });
-  if (tokenBal < amount) {
-    fail(`${pair.baseSymbol} balance ${formatEther(tokenBal)} < requested ${amountStr}.`);
+  const before = await snapshotBalances(publicClient, account.address, pair.baseAddress);
+  if (before.base < amount) {
+    fail(`${pair.baseSymbol} balance ${formatEther(before.base)} < requested ${amountStr}.`);
   }
 
   let approveTx = null;
@@ -256,6 +381,11 @@ async function cmdSell(symbol, priceStr, amountStr) {
     to: DEX_CONTRACT, data, value: 0n, gas: (gas * 120n) / 100n,
   });
   const receipt = await publicClient.waitForTransactionReceipt({ hash });
+  const after = await snapshotBalances(publicClient, account.address, pair.baseAddress);
+  const gasCost = (receipt.gasUsed ?? 0n) * (receipt.effectiveGasPrice ?? 0n);
+  const fill = receipt.status === "success"
+    ? computeFillState({ side: "sell", before, after, requestedAmount: amount, gasCost })
+    : { fillState: "reverted", tokensTransferredOut: "0", nativeReceivedNetCROSS: "0", note: "tx reverted" };
   console.log(JSON.stringify({
     action: "sell",
     symbol: pair.baseSymbol,
@@ -267,6 +397,7 @@ async function cmdSell(symbol, priceStr, amountStr) {
     txHash: hash,
     status: receipt.status,
     explorer: EXPLORER_TX(hash),
+    fill,
   }, null, 2));
 }
 
@@ -299,15 +430,16 @@ async function cmdCancel(symbol, orderIdStr) {
 const [, , cmd, ...rest] = process.argv;
 
 const commands = {
-  pairs:   () => cmdPairs(),
-  balance: () => cmdBalance(),
-  buy:     () => cmdBuy(rest[0], rest[1], rest[2]),
-  sell:    () => cmdSell(rest[0], rest[1], rest[2]),
-  cancel:  () => cmdCancel(rest[0], rest[1]),
+  pairs:        () => cmdPairs(),
+  balance:      () => cmdBalance(),
+  buy:          () => cmdBuy(rest[0], rest[1], rest[2]),
+  sell:         () => cmdSell(rest[0], rest[1], rest[2]),
+  "market-buy": () => cmdMarketBuy(rest[0], rest[1]),
+  cancel:       () => cmdCancel(rest[0], rest[1]),
 };
 
 if (!cmd || !commands[cmd]) {
-  console.error("Usage: node trade.mjs <pairs|balance|buy|sell|cancel> [args]");
+  console.error("Usage: node trade.mjs <pairs|balance|buy|sell|market-buy|cancel> [args]");
   process.exit(2);
 }
 

@@ -25,13 +25,16 @@ All on-chain calls go to the router with raw calldata.
 
 | Op | Selector | Layout (after selector, each slot = 32 bytes) |
 |---|---|---|
-| Buy limit  | `0xeafff4e0` | `pair, price, amount, orderType=0, hint1=0, hint2=0, maxMatch=50` |
-| Sell limit | `0x349ed71f` | `pair, price, amount, orderType=0, hint1=0, hint2=0, maxMatch=50` |
-| Cancel     | `0x1ec482d7` | `pair, dynOffset=0x40, orderIdsLen=1, orderId` |
+| Buy limit   | `0xeafff4e0` | `pair, price, amount, orderType=0, hint1=0, hint2=0, maxMatch=50` |
+| Sell limit  | `0x349ed71f` | `pair, price, amount, orderType=0, hint1=0, hint2=0, maxMatch=50` |
+| Buy market  | `0x1e920084` | `pair, spendAmount, maxMatchCount` (= `submitBuyMarket(address,uint256,uint256)`) |
+| Cancel      | `0x1ec482d7` | `pair, dynOffset=0x40, orderIdsLen=1, orderId` |
 
 - `price` = quote-per-base in 18 decimals (e.g. `parseEther("0.128")`)
 - `amount` = base token amount in 18 decimals
+- `amount` MUST be a positive integer multiple of the pair's `lot_size` (CROMx-class pairs use `lot_size=1`, i.e. whole tokens). Fractional amounts revert at `estimateGas`; `trade.mjs` enforces this client-side via `assertLotMultiple`.
 - Buy limit: caller MUST send `value = (price * amount) / 1e18` CROSS
+- Buy market: caller MUST send `value = spendAmount` CROSS; the contract refunds any unmatched CROSS to the caller. Surface the refund via base/native balance diff.
 - Sell limit: caller MUST first `approve(DEX_CONTRACT, amount)` on the base ERC20
 
 ### Smart-wallet limitation

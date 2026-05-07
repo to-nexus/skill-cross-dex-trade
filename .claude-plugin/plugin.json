@@ -1,6 +1,6 @@
 {
   "name": "cross-dex-trade",
-  "description": "CROSS Chain (id 612055) Gametoken orderbook DEX trading via EOA + viem. Optionally dispatched through an OpenClaw agent. Bundles a Node.js trader, SOUL.md template, and credential-handling rules.",
+  "description": "CROSS Chain (id 612055) Gametoken orderbook DEX trading via EOA + viem. Limit buy/sell with lot-size pre-flight, market-buy (CROSS-spend semantics via submitBuyMarket), and cancel; every trade emits a fill block (filled/partial/open/reverted) derived from base/native balance diffs. Optionally dispatched through an OpenClaw agent. Bundles a Node.js trader, SOUL.md template, and credential-handling rules.",
   "author": {
     "name": "to-nexus"
   },
