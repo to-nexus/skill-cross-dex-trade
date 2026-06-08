@@ -1,6 +1,6 @@
 ---
 name: cross-dex-trade
-description: This skill should be used when the user asks to trade, swap, buy, or sell tokens on CROSS Chain (chain id 612055), or to drive an OpenClaw agent to execute on-chain DEX orders against the Gametoken orderbook. Supports limit `buy`/`sell` with lot-size pre-flight, **market `market-buy` (CROSS-spend semantics)**, and `cancel`. Every trade emits a post-tx `fill` block (filled / partial / open / reverted) derived from base/native balance diffs so callers never confuse a successful tx receipt with an actual fill. Handles credential collection (PRIVATE_KEY via .env or one-shot prompt), safety caps, calldata building, and transaction submission. Triggers on phrases like "CROSS chain trade", "Gametoken buy/sell", "buy 5 CROSS worth of CROMx", "market buy", "openclaw dex", "trade RUBYx/MGT/GHUBx/SHOUT", "오픈클로 거래", "지정가/시장가 매수".
+description: This skill should be used when the user asks to trade, swap, buy, or sell tokens on CROSS Chain (chain id 612055), or to drive an OpenClaw agent to execute on-chain DEX orders against the Gametoken orderbook. Supports limit `buy`/`sell` with lot-size pre-flight, **market `market-buy` (CROSS-spend semantics)**, and `cancel`. Every trade emits a post-tx `fill` block (filled / partial / open / reverted) derived from base/native balance diffs so callers never confuse a successful tx receipt with an actual fill. Uses local signer configuration from `.env`, safety caps, calldata building, and transaction submission. Triggers on phrases like "CROSS chain trade", "Gametoken buy/sell", "buy 5 CROSS worth of CROMx", "market buy", "openclaw dex", "trade RUBYx/MGT/GHUBx/SHOUT", "오픈클로 거래", "지정가/시장가 매수".
 version: 0.2.0
 license: MIT
 ---
@@ -45,23 +45,18 @@ SKILL_DIR="$HOME/.claude/skills/cross-dex-trade"
 
 ## 3. Credential resolution — strict priority
 
-Resolve the trading EOA in this order. **Never echo the private key back to the user, never write it into the conversation transcript, never log it.**
+Resolve the trading EOA in this order. **Never echo wallet secrets back to the user, never write them into the conversation transcript, never log them, and never ask the user to paste them into chat.**
 
 1. **`./.env` in the user's current working directory** — read `PRIVATE_KEY` and (optionally) `WALLET_ADDRESS`, `CROSS_RPC_URL`, `MAX_TRADE_CROSS`.
 2. **`$HOME/.claude/skills/cross-dex-trade/.env`** — same vars, used as the personal default.
-3. **Ask the user** — only if both files lack `PRIVATE_KEY`. Use this exact prompt:
+3. **Missing signer config** — if both files lack `PRIVATE_KEY`, stop. Tell the user to create `~/.claude/skills/cross-dex-trade/.env` locally with:
 
-   > "I need a CROSS Chain EOA private key (0x-prefixed, 64 hex chars) to sign the trade.
-   > **Option A (recommended):** stop here, paste this into `~/.claude/skills/cross-dex-trade/.env`:
-   > ```
-   > PRIVATE_KEY=0x...
-   > MAX_TRADE_CROSS=10
-   > ```
-   > then re-ask. I won't see it.
-   >
-   > **Option B (one-shot):** paste it now. It will be passed to the script via process env only and will NOT be saved to disk by me. It will appear once in this transcript."
+   ```bash
+   PRIVATE_KEY=<0x-prefixed-64-hex-secret>
+   MAX_TRADE_CROSS=10
+   ```
 
-   If the user picks B, accept the PK as a string, **do not echo it**, pass it to the script as `PRIVATE_KEY=...` on the same Bash command line, and after the trade tell the user to consider rotating the key if the transcript is shared.
+   Then ask them to re-run the request. Do not collect the secret in chat, and do not pass it on the command line.
 
 Validation: the value must match `^0x[0-9a-fA-F]{64}$`. Reject otherwise without retrying silently.
 
@@ -103,8 +98,9 @@ Subcommands (output is JSON for easy parsing):
 
 Examples:
 ```bash
-PRIVATE_KEY=0x... node scripts/trade.mjs buy RUBYx 0.128 31
-PRIVATE_KEY=0x... node scripts/trade.mjs market-buy CROMx 5
+set -a; source "$HOME/.claude/skills/cross-dex-trade/.env"; set +a
+node scripts/trade.mjs buy RUBYx 0.128 31
+node scripts/trade.mjs market-buy CROMx 5
 ```
 
 **Pick limit vs market by user intent.** Phrases like "buy N <SYMBOL> at <PRICE>" or a stated bid price → `buy`. Phrases like "buy <CROSS_AMOUNT> CROSS worth of <SYMBOL>" or "spend X CROSS on …" → `market-buy`. Never assume a limit price for the user.

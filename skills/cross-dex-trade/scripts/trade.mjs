@@ -447,6 +447,6 @@ try {
   await commands[cmd]();
 } catch (err) {
   console.error(`ERROR: ${err?.shortMessage || err?.message || err}`);
-  if (process.env.DEBUG) console.error(err);
+  if (process.env.DEBUG) console.error(err?.message ?? String(err));
   process.exit(1);
 }
