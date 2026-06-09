@@ -58,6 +58,11 @@ Resolve the trading EOA in this order. **Never echo wallet secrets back to the u
 
    Then ask them to re-run the request. Do not collect the secret in chat, and do not pass it on the command line.
 
+For personal testing, the default `env` backend reads the key from local
+environment variables or a gitignored `.env` file. For team, hosted-agent, or
+production funds, prefer Vault Transit, KMS, or HSM-backed signing so the raw
+key is not exported to the agent runtime.
+
 Validation: the value must match `^0x[0-9a-fA-F]{64}$`. Reject otherwise without retrying silently.
 
 ---
