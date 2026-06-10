@@ -1,10 +1,13 @@
 {
   "name": "cross-dex-trade",
-  "version": "0.1.0",
+  "version": "0.3.0",
   "private": true,
   "type": "module",
-  "description": "CROSS Chain Gametoken DEX trader — bundled by the cross-dex-trade Claude skill.",
+  "description": "CROSS Chain GameToken swap and AMM liquidity trader — bundled by the cross-dex-trade Claude skill.",
   "engines": { "node": ">=20" },
+  "scripts": {
+    "test": "node scripts/selftest.mjs"
+  },
   "dependencies": {
     "viem": "^2.21.0"
   }

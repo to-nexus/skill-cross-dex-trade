@@ -1,71 +1,33 @@
 # cross-dex-trade
 
-A Claude Code skill that executes on-chain orders on the **Gametoken orderbook** at **CROSS Chain** (chain id `612055`), optionally dispatched through an [OpenClaw](https://github.com/openclaw/openclaw) agent.
+A Claude Code skill that quotes and executes **swap-based GameToken trades and AMM liquidity actions** on **CROSS Chain** (chain id `612055`).
 
-- **Stack:** EOA + viem (no ERC-4337, no paymaster)
-- **DEX:** Gametoken router `0x6690844Aac584AcA982E195B7BDeBd48740fbcb1`
-- **Subcommands:** `pairs`, `balance`, `buy`, `sell`, `cancel`
-- **Distribution:** standalone Claude skill **and** wrapped as a Claude Code plugin
+The old orderbook flow has been removed. This skill now follows the current `x.crosstoken.io/tokens` service: token/game metadata, market stats, chart candles, recent swaps, token discovery, AMM pair discovery, quotes, CROSS -> GameToken swaps, exact-output buys, GameToken -> CROSS swaps, liquidity deposit/withdraw, LP balance checks, and wallet balance checks.
 
-> ⚠️ **This skill signs and broadcasts real transactions with the private key you provide.** Test with small amounts. Set `MAX_TRADE_CROSS` in `.env`. Read `skills/cross-dex-trade/scripts/trade.mjs` before using.
+- **Stack:** EOA + viem
+- **API:** `https://game-swap-api.cross.nexus/v1`
+- **Router:** `0x639Adf46ac111399361c422bC32c3892f0cbb70c`
+- **Wrapped CROSS:** `0x8739bC962460a8a25184aaa9166b74dd8448a194`
+- **Subcommands:** `tokens`, `token-info`, `pairs`, `quote`, `balance`, `buy`, `buy-exact`, `sell`, `quote-deposit`, `deposit`, `quote-deposit-token`, `deposit-token`, `quote-withdraw`, `withdraw`
 
----
+> This skill signs and broadcasts real swap and liquidity transactions with the private key you provide. Test with small amounts and set `MAX_TRADE_CROSS` in `.env`.
 
-## Install — Recommended (via Marketplace)
+## Install
 
 ```bash
 /plugin marketplace add github.com/to-nexus/cross-skills-suite
 /plugin install cross-dex-trade@cross-skills-suite
 ```
 
-Part of the [CROSS Skills Suite](https://github.com/to-nexus/cross-skills-suite) — installs alongside `cross-prediction` and other CROSS Chain ecosystem skills.
-
----
-
-## Install — Standalone
-
-### Option 1 — Plain skill (one user, fastest)
+Standalone:
 
 ```bash
 git clone <this-repo> /tmp/skill-cross-dex-trade
-bash /tmp/skill-cross-dex-trade/install.sh        # symlinks into ~/.claude/skills/
+bash /tmp/skill-cross-dex-trade/install.sh
 ```
-
-Or manually:
-```bash
-cp -r skills/cross-dex-trade ~/.claude/skills/
-cd ~/.claude/skills/cross-dex-trade && npm install
-```
-
-### Option 2 — Claude Code plugin (marketplace-installable)
-
-If you maintain a marketplace, add an entry pointing at this repo:
-
-```json
-{
-  "name": "cross-dex-trade",
-  "source": { "source": "github", "repo": "to-nexus/skill-cross-dex-trade" },
-  "category": "blockchain"
-}
-```
-
-End users then run `/plugin marketplace add <your-marketplace>` then `/plugin install cross-dex-trade`.
-
-### Option 3 — OpenClaw agent dispatcher (advanced)
-
-After Option 1, copy the SOUL.md template into an OpenClaw workspace:
-```bash
-mkdir -p ~/.openclaw/workspaces/cross-dex
-cp ~/.claude/skills/cross-dex-trade/assets/SOUL.template.md ~/.openclaw/workspaces/cross-dex/SOUL.md
-ln -s ~/.claude/skills/cross-dex-trade/.env ~/.openclaw/workspaces/cross-dex/.env
-```
-Then drive it via Claude with phrases like *"openclaw로 RUBYx 10개 매수해줘"*.
-
----
 
 ## Configuration
 
-Copy the template and fill in your wallet:
 ```bash
 cp skills/cross-dex-trade/.env.example skills/cross-dex-trade/.env
 chmod 600 skills/cross-dex-trade/.env
@@ -73,84 +35,89 @@ chmod 600 skills/cross-dex-trade/.env
 
 | Variable | Required | Default | Notes |
 |---|---|---|---|
-| `PRIVATE_KEY` | yes | — | EOA signer, `0x` + 64 hex chars |
-| `MAX_TRADE_CROSS` | recommended | unset | Per-trade CROSS notional cap; trade aborts above this |
-| `CROSS_RPC_URL` | no | `https://mainnet.crosstoken.io:22001/` | Override only if you have a private RPC |
-| `WALLET_ADDRESS` | no | derived from PK | Cross-check; mismatch aborts |
-
-The skill resolves `.env` from (in order): cwd → `~/.claude/skills/cross-dex-trade/` → asks once.
-
----
+| `PRIVATE_KEY` | write commands | - | EOA signer, `0x` + 64 hex chars |
+| `MAX_TRADE_CROSS` | recommended | unset | Per-transaction CROSS notional cap |
+| `CROSS_RPC_URL` | no | `https://mainnet.crosstoken.io:22001/` | RPC override |
+| `WALLET_ADDRESS` | no | derived from PK | Mismatch aborts |
+| `GAME_SWAP_API_URL` | no | `https://game-swap-api.cross.nexus/v1` | API override |
 
 ## Usage
 
-Inside Claude Code, just describe the trade in plain language. The skill activates on phrases like:
-- "buy 31 RUBYx at 0.128 CROSS"
-- "show CROSS balance"
-- "list active gametoken pairs"
-- "cancel order 12345 on RUBYx"
-- "openclaw로 SHOUT 100개 0.03에 매도"
+Inside Claude Code, describe the swap in plain language:
+- "RUBYx 1 CROSS어치 견적 내줘"
+- "SHILTZx 게임 정보랑 최근 거래 보여줘"
+- "RUBYx 1 CROSS어치 사줘"
+- "RUBYx 10개 정확히 사줘"
+- "RUBYx 10개 팔아줘"
+- "RUBYx pool에 1 CROSS 예치해줘"
+- "SHILTZx 20개를 pool에 예치해줘"
+- "RUBYx LP 0.5개 출금해줘"
+- "내 GameToken 잔고 보여줘"
 
-Direct CLI (skipping Claude):
+Direct CLI:
+
 ```bash
 cd ~/.claude/skills/cross-dex-trade
-PRIVATE_KEY=0x... node scripts/trade.mjs pairs
+node scripts/trade.mjs tokens --query=RUBY
+node scripts/trade.mjs token-info SHILTZx --history=5 --candles=12 --tick=1h
+node scripts/trade.mjs token-info all --limit=20
+node scripts/trade.mjs pairs
+node scripts/trade.mjs quote buy RUBYx 1
+node scripts/trade.mjs quote buy-exact RUBYx 10
+node scripts/trade.mjs quote sell RUBYx 10
+node scripts/trade.mjs quote-deposit RUBYx 1
+node scripts/trade.mjs quote-deposit-token SHILTZx 20
+node scripts/trade.mjs quote-withdraw RUBYx 0.5
 PRIVATE_KEY=0x... node scripts/trade.mjs balance
-PRIVATE_KEY=0x... node scripts/trade.mjs buy   RUBYx 0.128 31
-PRIVATE_KEY=0x... node scripts/trade.mjs sell  RUBYx 0.150 10
-PRIVATE_KEY=0x... node scripts/trade.mjs cancel RUBYx 1234
+PRIVATE_KEY=0x... node scripts/trade.mjs buy RUBYx 1 --slippage-bps=300
+PRIVATE_KEY=0x... node scripts/trade.mjs buy-exact RUBYx 10 --slippage-bps=300
+PRIVATE_KEY=0x... node scripts/trade.mjs sell RUBYx 10 --slippage-bps=300
+PRIVATE_KEY=0x... node scripts/trade.mjs deposit RUBYx 1 --slippage-bps=300
+PRIVATE_KEY=0x... node scripts/trade.mjs deposit-token SHILTZx 20 --slippage-bps=300
+PRIVATE_KEY=0x... node scripts/trade.mjs withdraw RUBYx 0.5 --slippage-bps=300
+PRIVATE_KEY=0x... node scripts/trade.mjs withdraw RUBYx all --slippage-bps=300
 ```
 
-All commands emit a single JSON object on stdout (txHash, status, explorer URL).
+All commands emit one JSON object on stdout.
 
----
+## Safety Model
+
+1. Chain id must be `612055`.
+2. `MAX_TRADE_CROSS` caps buy spend, buy-exact max input, sell quoted output, deposit CROSS input, and withdraw quoted CROSS output.
+3. Default slippage is `300` bps. Values above `5000` bps are refused.
+4. `sell`, `deposit`, and `withdraw` auto-approve the router only when allowance is insufficient.
+
+## Verification
+
+Run the network-backed smoke test after any swap API or router change:
+
+```bash
+cd skills/cross-dex-trade
+npm test
+```
+
+The test validates token discovery, token-info discovery, pair discovery, `buy` / `buy-exact` / `sell` quote schema, deposit/withdraw quote math, router calldata selectors, and removal of legacy orderbook commands from `SKILL.md`. It does not sign or broadcast transactions.
+
+## Removed Legacy Behavior
+
+Orderbook commands are intentionally gone: no limit orders, no market matcher, no open orders, no cancels, no bid/ask depth, and no fill/open/partial state. Use `quote` plus swap slippage bounds instead.
 
 ## Layout
 
-```
-skill-cross-dex-trade/                  # repo root = plugin
-├── .claude-plugin/
-│   └── plugin.json                     # plugin manifest (Option 2)
-├── install.sh                          # symlink installer (Option 1)
+```text
+skill-cross-dex-trade/
+├── .claude-plugin/plugin.json
+├── install.sh
 ├── README.md
-├── LICENSE
-└── skills/
-    └── cross-dex-trade/                # the skill itself
-        ├── SKILL.md                    # what Claude reads to drive trades
-        ├── package.json                # viem dependency
-        ├── .env.example
-        ├── scripts/
-        │   └── trade.mjs               # EOA trader (pairs/balance/buy/sell/cancel)
-        ├── references/
-        │   └── cross-chain.md          # chain + DEX details (lazy-loaded)
-        └── assets/
-            └── SOUL.template.md        # OpenClaw agent definition
+└── skills/cross-dex-trade/
+    ├── SKILL.md
+    ├── package.json
+    ├── .env.example
+    ├── scripts/trade.mjs
+    ├── references/cross-chain.md
+    └── assets/SOUL.template.md
 ```
-
----
-
-## Safety model
-
-The skill enforces three independent rails:
-
-1. **Chain-id check.** `trade.mjs` aborts unless `eth_chainId == 612055`.
-2. **Notional cap.** If `MAX_TRADE_CROSS` is set, any single trade exceeding it aborts before signing.
-3. **Confirmation prompt.** `SKILL.md` instructs Claude to require an explicit "yes" for trades > 1 CROSS.
-
-The bundled OpenClaw `SOUL.md` adds a fourth rail: the agent will only run the five whitelisted subcommands, never arbitrary shell.
-
-The private key never appears in the Claude transcript unless the user pastes it in directly (Option B in `SKILL.md`'s credential resolution). Even then, it's passed via `process.env` to the spawned `node`, not echoed back.
-
----
-
-## Limitations
-
-- **Gametoken orderbook only.** Forge (`x.crosstoken.io/forge`) and CrossDefi (`crossdefi.io/swap-bridge`) are web-UI flows; this skill does not drive them.
-- **EOA only.** ERC-4337 / smart-wallet trading isn't supported here — the source project [`ara_4337`](https://github.com/) covers that path.
-- **No slippage controls beyond limit price.** Limit orders are inherently slippage-bounded; market orders are not implemented.
-
----
 
 ## License
 
-[MIT](LICENSE) — but read the disclaimer at the bottom of the LICENSE file before using.
+[MIT](LICENSE)

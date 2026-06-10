@@ -1,6 +1,6 @@
-# CROSS Chain & Gametoken DEX — Reference
+# CROSS Chain & GameToken Swap Reference
 
-Loaded by Claude only when the SKILL needs the underlying details (e.g. user asks about contract addresses, the script throws an unfamiliar revert, or someone is forking the skill).
+Loaded by Claude only when the skill needs underlying details, such as contract addresses, API paths, liquidity math, or ABI debugging.
 
 ## Chain
 
@@ -9,47 +9,72 @@ Loaded by Claude only when the SKILL needs the underlying details (e.g. user ask
 | Chain ID | `612055` |
 | Default RPC | `https://mainnet.crosstoken.io:22001/` |
 | Native token | CROSS (18 decimals) |
-| Block explorer | `https://explorer.crosstoken.io/612055` (tx URL: `.../tx/<hash>`) |
+| Block explorer | `https://explorer.crosstoken.io/612055` |
 
 Override RPC with `CROSS_RPC_URL`.
 
-## Gametoken Orderbook DEX
+## GameToken Swap + Liquidity
 
-- **Router (proxy):** `0x6690844Aac584AcA982E195B7BDeBd48740fbcb1`
-- **Pair-info API:** `https://dex-api.crosstoken.io/dex/pair-info` → returns pair list with `pair_address`, `base_symbol`, `base_address`, `quote_symbol`, `quote_address`, `tick_size`, `lot_size`, `min_amount`, `billboard.price`, `active`.
-- **Open orders API:** `https://dex-api.crosstoken.io/dex/open-order?owner=<addr>&pair=<pairAddress>`
+The current `x.crosstoken.io/tokens` service is AMM swap-based. Deposit and withdraw are router liquidity operations against the same AMM pairs.
 
-### Function selectors & calldata
+| Item | Value |
+|---|---|
+| API base | `https://game-swap-api.cross.nexus/v1` |
+| Router proxy | `0x639Adf46ac111399361c422bC32c3892f0cbb70c` |
+| Router implementation | `0xa5aa6e57b4a0402d9758e46612e382a4adfcbeab` |
+| Wrapped native CROSS | `0x8739bC962460a8a25184aaa9166b74dd8448a194` |
+| Zap proxy | `0x622fC43D7CEB5396509C875925bc3a1660Eff9cE` |
 
-All on-chain calls go to the router with raw calldata.
+API paths used by the script:
 
-| Op | Selector | Layout (after selector, each slot = 32 bytes) |
-|---|---|---|
-| Buy limit   | `0xeafff4e0` | `pair, price, amount, orderType=0, hint1=0, hint2=0, maxMatch=50` |
-| Sell limit  | `0x349ed71f` | `pair, price, amount, orderType=0, hint1=0, hint2=0, maxMatch=50` |
-| Buy market  | `0x1e920084` | `pair, spendAmount, maxMatchCount` (= `submitBuyMarket(address,uint256,uint256)`) |
-| Cancel      | `0x1ec482d7` | `pair, dynOffset=0x40, orderIdsLen=1, orderId` |
+| Path | Purpose |
+|---|---|
+| `/tokens` | Listed GameTokens, metadata, game info, stats |
+| `/tokens/<address>` | Single GameToken metadata, stats, description, game pointer |
+| `/tokens/<address>/candles?tick=<1m|5m|15m|1h|4h|1d>&size=<N>` | Token price candles |
+| `/tokens/<address>/holders` | Token holder list when indexed |
+| `/games` | Listed game metadata |
+| `/games/<slug>` | Game detail, genre, developer, publisher, platforms, release year, website |
+| `/pairs` | AMM pair addresses and reserves |
+| `/pairs/<address>` | Pair reserves, fee config, 24h counts |
+| `/pairs/<address>/swaps?limit=<N>` | Recent swap events |
+| `/pairs/<address>/liquidity?limit=<N>` | Recent liquidity add/remove events |
+| `/quote?pair=<pair>&token_in=<addr>&amount_in=<wei>&exact=in` | Exact-input quote |
+| `/quote?pair=<pair>&token_in=<addr>&amount_out=<wei>&exact=out` | Exact-output quote |
 
-- `price` = quote-per-base in 18 decimals (e.g. `parseEther("0.128")`)
-- `amount` = base token amount in 18 decimals
-- `amount` MUST be a positive integer multiple of the pair's `lot_size` (CROMx-class pairs use `lot_size=1`, i.e. whole tokens). Fractional amounts revert at `estimateGas`; `trade.mjs` enforces this client-side via `assertLotMultiple`.
-- Buy limit: caller MUST send `value = (price * amount) / 1e18` CROSS
-- Buy market: caller MUST send `value = spendAmount` CROSS; the contract refunds any unmatched CROSS to the caller. Surface the refund via base/native balance diff.
-- Sell limit: caller MUST first `approve(DEX_CONTRACT, amount)` on the base ERC20
+Liquidity deposit/withdraw quotes are computed locally from `/pairs` reserves and pair LP supply:
+- deposit CROSS amount -> required GameToken amount and expected LP amount
+- withdraw LP amount -> expected GameToken and CROSS outputs
 
-### Smart-wallet limitation
+Router functions used:
 
-The DEX rejects calls from contract callers with `error 0xa7392345`. ERC-4337 smart wallets must therefore relay through their owner EOA (transfer base token / CROSS to owner first, then have owner call DEX directly). The bundled `trade.mjs` is EOA-only and avoids this whole class of failures.
+| Operation | Function |
+|---|---|
+| Buy exact input | `swapExactNativeForTokens(uint256 amountOutMin, address[] path, address to, uint256 deadline)` |
+| Buy exact output | `swapNativeForExactTokens(uint256 amountOut, address[] path, address to, uint256 deadline)` |
+| Sell exact input | `swapExactTokensForNative(uint256 amountIn, uint256 amountOutMin, address[] path, address to, uint256 deadline)` |
+| Deposit liquidity | `addLiquidity(address token, uint256 amountTokenDesired, uint256 amountTokenMin, uint256 amountNativeMin, address to, uint256 deadline)` with native desired sent as `msg.value` |
+| Withdraw liquidity | `removeLiquidity(address token, uint256 liquidity, uint256 amountTokenMin, uint256 amountNativeMin, address to, uint256 deadline)` |
 
-## Other CROSS DEXes — not in this skill
+Pair functions used:
 
-- **Forge** (meme swap): `https://x.crosstoken.io/forge` — web UI, no documented public API. Needs browser automation.
-- **CrossDefi** (cross-chain swap/bridge): `https://www.crossdefi.io/swap-bridge` — same.
+| Purpose | Function |
+|---|---|
+| LP supply | `totalSupply()` |
+| LP wallet balance | `balanceOf(address)` |
+| Router allowance | `allowance(address owner, address spender)` |
+| LP approval | `approve(address spender, uint256 amount)` |
 
-If asked, tell the user this skill only covers Gametoken; the others require browser tooling.
+Path conventions:
+- Buy: `[wrappedNative, token]`
+- Sell: `[token, wrappedNative]`
 
-## Reference: ara_4337 source
+Slippage:
+- `buy` and `sell` lower the quoted output by `slippageBps`.
+- `buy-exact` raises the quoted CROSS input by `slippageBps`.
+- `deposit` lowers the required token minimum by `slippageBps` while sending the exact CROSS amount.
+- `withdraw` lowers both token and CROSS minimum outputs by `slippageBps`.
 
-- `scripts/gametoken-trade.ts` — the EOA + 4337 reference implementation this skill's trade.mjs is derived from.
-- `src/lib/bundler/submit-orderbook.ts` — orderbook submit helper used by the chat UI.
-- `docs/DEPLOYED_CONTRACTS_REPORT.md` — chain + contract addresses.
+## Removed Orderbook Flow
+
+The previous orderbook router `0x6690844Aac584AcA982E195B7BDeBd48740fbcb1`, pair-info API, limit orders, market buy matcher, open orders, and cancel flow are obsolete for this skill. Do not describe or call them unless explicitly discussing legacy behavior.

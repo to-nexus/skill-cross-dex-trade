@@ -52,8 +52,9 @@ NEXT STEPS
        ln -s $SKILL_SRC/.env ~/.openclaw/workspaces/cross-dex/.env
 
   3. Try it from Claude Code:
-       "list active CROSS gametoken pairs"
-       "balance"
+       "list CROSS GameToken pairs"
+       "quote 1 CROSS worth of RUBYx"
+       "quote depositing 1 CROSS into the RUBYx pool"
 
 EOF
 else

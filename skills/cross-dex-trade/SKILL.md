@@ -1,40 +1,46 @@
 ---
 name: cross-dex-trade
-description: This skill should be used when the user asks to trade, swap, buy, or sell tokens on CROSS Chain (chain id 612055), or to drive an OpenClaw agent to execute on-chain DEX orders against the Gametoken orderbook. Supports limit `buy`/`sell` with lot-size pre-flight, **market `market-buy` (CROSS-spend semantics)**, and `cancel`. Every trade emits a post-tx `fill` block (filled / partial / open / reverted) derived from base/native balance diffs so callers never confuse a successful tx receipt with an actual fill. Uses local signer configuration from `.env`, safety caps, calldata building, and transaction submission. Triggers on phrases like "CROSS chain trade", "Gametoken buy/sell", "buy 5 CROSS worth of CROMx", "market buy", "openclaw dex", "trade RUBYx/MGT/GHUBx/SHOUT", "오픈클로 거래", "지정가/시장가 매수".
-version: 0.2.0
+description: Use this skill when the user asks to list, inspect, quote, buy, sell, swap, deposit liquidity, or withdraw liquidity for GameTokens on CROSS Chain (chain id 612055). The service is now AMM swap-based, not orderbook-based. Supports token/game metadata, market stats, chart candles, trade history, token/pair discovery, quote, CROSS -> GameToken swaps, exact-output buys, GameToken -> CROSS swaps, GameToken+CROSS LP deposits, LP withdrawals, balances, local EOA signing, slippage controls, and per-trade CROSS caps. Triggers on phrases like "CROSS chain swap", "GameToken info", "SHILTZx 정보", "GameToken buy/sell", "deposit RUBYx liquidity", "withdraw RUBYx LP", "buy 5 CROSS worth of RUBYx", "sell 100 CROMx", "quote SHOUT", "크로스 게임토큰 스왑", "RUBYx 매수/매도/예치/인출".
+version: 0.3.0
 license: MIT
 ---
 
-# CROSS Chain DEX Trading via OpenClaw
+# CROSS Chain GameToken Swap
 
-A distributable skill that lets Claude (optionally driving an OpenClaw agent) place on-chain orders on the **Gametoken orderbook** at CROSS Chain (chain id `612055`). Execution path is **EOA + viem** — no ERC-4337 / paymaster required.
+This skill lets Claude quote and execute **swap-based GameToken trades and AMM liquidity actions** on CROSS Chain (`612055`). The previous orderbook flow is obsolete; do not use orderbook, limit price, open order, fill-state, or cancel semantics.
 
-> **Scope (v0.2):** Gametoken orderbook only — limit buy/sell, **market buy** (`submitBuyMarket`), cancel, balance, pair listing. Every trade emits a `fill` block (post-tx pre/post-balance diff) so callers distinguish a `success` receipt with an open/unfilled order from one that actually filled. Forge and CrossDefi are HTTP/web-UI flows and stay out of scope.
+Execution path is local **EOA + viem**. Write commands sign and broadcast real transactions using the user's local `.env`.
 
 ---
 
 ## 1. Activation
 
 Activate when the user wants to:
-- Buy/sell a token by symbol on CROSS Chain (e.g. "buy 10 RUBYx at 0.128 CROSS")
-- List active CROSS Gametoken pairs / check on-chain balance
-- Cancel a pending Gametoken order
-- Have OpenClaw run any of the above autonomously
+- List GameTokens or AMM pairs on `x.crosstoken.io/tokens`
+- Inspect token/game metadata, market stats, chart candles, recent swaps, and liquidity events
+- Quote a GameToken swap
+- Buy a GameToken with CROSS
+- Buy an exact amount of a GameToken with a max CROSS spend
+- Sell a GameToken back to CROSS
+- Deposit GameToken+CROSS liquidity into an AMM pair
+- Withdraw GameToken+CROSS liquidity from LP tokens
+- Check the configured wallet's CROSS and GameToken balances
+- Have OpenClaw run one of the same commands
 
-If the user asks about Forge/CrossDefi specifically, tell them this skill doesn't cover those yet (they're web-UI flows) and stop.
+If the user asks for an orderbook, limit order, order cancellation, bid/ask depth, or open orders, explain that `cross-dex-trade` has moved to AMM-based GameToken swaps and liquidity actions, so orderbook operations are no longer supported.
 
 ---
 
-## 2. Prerequisites — verify before doing anything else
+## 2. Prerequisites
 
-Run these checks in order. Stop and report to the user at the first failure.
+Run these checks before execution:
 
 ```bash
 node --version          # require >= 20
-which openclaw          # optional — only needed if user asked to dispatch through openclaw
+which openclaw          # optional; only needed for explicit OpenClaw dispatch
 ```
 
-Then ensure the script's deps are installed (one-time):
+Install dependencies once:
 
 ```bash
 SKILL_DIR="$HOME/.claude/skills/cross-dex-trade"
@@ -43,113 +49,145 @@ SKILL_DIR="$HOME/.claude/skills/cross-dex-trade"
 
 ---
 
-## 3. Credential resolution — strict priority
+## 3. Credential Resolution
 
-Resolve the trading EOA in this order. **Never echo wallet secrets back to the user, never write them into the conversation transcript, never log them, and never ask the user to paste them into chat.**
+Resolve the trading EOA in this order. Never echo secrets, never ask the user to paste a private key into chat, and never pass it on the command line.
 
-1. **`./.env` in the user's current working directory** — read `PRIVATE_KEY` and (optionally) `WALLET_ADDRESS`, `CROSS_RPC_URL`, `MAX_TRADE_CROSS`.
-2. **`$HOME/.claude/skills/cross-dex-trade/.env`** — same vars, used as the personal default.
-3. **Missing signer config** — if both files lack `PRIVATE_KEY`, stop. Tell the user to create `~/.claude/skills/cross-dex-trade/.env` locally with:
+1. `./.env` in the user's current working directory
+2. `$HOME/.claude/skills/cross-dex-trade/.env`
+3. If both lack `PRIVATE_KEY`, stop and tell the user to create:
 
-   ```bash
-   PRIVATE_KEY=<0x-prefixed-64-hex-secret>
-   MAX_TRADE_CROSS=10
-   ```
+```bash
+PRIVATE_KEY=<0x-prefixed-64-hex-secret>
+MAX_TRADE_CROSS=10
+```
 
-   Then ask them to re-run the request. Do not collect the secret in chat, and do not pass it on the command line.
-
-For personal testing, the default `env` backend reads the key from local
-environment variables or a gitignored `.env` file. For team, hosted-agent, or
-production funds, prefer Vault Transit, KMS, or HSM-backed signing so the raw
-key is not exported to the agent runtime.
-
-Validation: the value must match `^0x[0-9a-fA-F]{64}$`. Reject otherwise without retrying silently.
+Supported env vars:
+- `PRIVATE_KEY` — required for `buy`, `buy-exact`, `sell`, `deposit`, `withdraw`, `balance`
+- `MAX_TRADE_CROSS` — optional but recommended per-trade CROSS notional cap
+- `CROSS_RPC_URL` — optional RPC override
+- `WALLET_ADDRESS` — optional derived-address cross-check
+- `GAME_SWAP_API_URL` — optional API override; default `https://game-swap-api.cross.nexus/v1`
 
 ---
 
-## 4. Safety rails — apply every time
+## 4. Safety Rails
 
-Before submitting any tx:
+Apply every time:
 
-1. **Chain id check** — the trade script verifies `eth_chainId == 612055` and aborts otherwise. Do not bypass.
-2. **MAX_TRADE_CROSS cap** — if env sets it, the script aborts when a single trade's CROSS notional exceeds it (for `market-buy` the spend itself is the notional). Recommend `MAX_TRADE_CROSS=10` to new users.
-3. **Lot-size guard** — `buy` and `sell` reject any `AMOUNT` that isn't a multiple of the pair's `lot_size` *before* signing. CROMx-style pairs use `lot_size=1` (whole tokens only); a fractional amount would otherwise fail at on-chain `estimateGas` with an opaque error.
-4. **Confirm with the user** before any trade where notional > 1 CROSS. Show the parsed intent (symbol, side, price, amount, total CROSS, MAX cap if any) and ask for an explicit "yes / 진행" before running. For balance/list commands, no confirmation needed.
-5. **Refuse** to run trades on behalf of an address the user can't read back. If `WALLET_ADDRESS` is set in env, derive from PK and warn on mismatch.
-6. Never stash the PK anywhere outside the env file the user explicitly chose.
+1. The script aborts unless `eth_chainId == 612055`.
+2. `MAX_TRADE_CROSS` aborts writes whose CROSS notional exceeds the cap. For liquidity, this means deposit CROSS input or withdraw quoted CROSS output.
+3. Default slippage is `300` bps (`3%`). Let the user set `--slippage-bps=N`; refuse above `5000`.
+4. Confirm with the user before any write where CROSS notional is greater than `1`. Show side, symbol, input amount, quoted output, slippage, cap, and wallet suffix.
+5. Never invent a limit price. This DEX is swap-based; use quote output and slippage bounds.
 
 ---
 
 ## 5. Execution
 
-Two dispatch modes — pick based on the user's phrasing:
-
-### Mode A — Direct (no openclaw)
-Default. Run the bundled script directly via Bash:
+Default direct mode:
 
 ```bash
 cd "$HOME/.claude/skills/cross-dex-trade"
-# env vars come from the .env you resolved in step 3 — load them yourself if needed
 node scripts/trade.mjs <subcommand> [args]
 ```
 
-Subcommands (output is JSON for easy parsing):
-- `pairs` — list active pairs (symbol, price, pair address, token address, **lot_size**, tick_size, min_amount)
-- `balance` — show CROSS + nonzero token balances for the EOA
-- `buy <SYMBOL> <PRICE> <AMOUNT>` — limit buy; sends `PRICE * AMOUNT` CROSS as value. Aborts before signing if `AMOUNT` is not a multiple of the pair's `lot_size`. Returns a `fill` block — `{fillState: "filled"|"partial"|"open"|"reverted", filledTokens, openRemainder, nativeSpentNetCROSS}` — derived from base/native balance diffs; an `open` order is the prompt to consider `cancel`.
-- `sell <SYMBOL> <PRICE> <AMOUNT>` — limit sell; auto-approves token to DEX (max uint) if allowance is short. Returns a `fill` block — `{tokensTransferredOut, nativeReceivedNetCROSS, note}` — without a `fillState` claim because tokens leaving the wallet doesn't by itself imply a fill.
-- `market-buy <SYMBOL> <CROSS_SPEND>` — calls `submitBuyMarket(pair, spendWei, MAX_MATCH)` with `msg.value = CROSS_SPEND`. Use this when the user expresses intent in CROSS notional ("buy 5 CROSS worth of CROMx") rather than token amount. Returns the same `fill` shape as `buy` plus `nativeRefundedCROSS`.
-- `cancel <SYMBOL> <ORDER_ID>` — cancel one open order on a pair
+Subcommands:
+- `tokens [--query=TEXT] [--limit=N]` — list GameTokens from the GameToken API; no signer required
+- `token-info <SYMBOL|all> [--query=TEXT] [--limit=N] [--history=N] [--liquidity-events=N] [--candles=N] [--tick=1m|5m|15m|1h|4h|1d]` — inspect token, game, market, pair, recent swap, liquidity, and candle data; no signer required
+- `pairs` — list AMM pairs, reserves, router, and wrapped native token; no signer required
+- `quote <buy|sell|buy-exact> <SYMBOL> <AMOUNT>` — quote without signing
+- `balance` — show CROSS and nonzero GameToken balances for the configured EOA
+- `buy <SYMBOL> <CROSS_SPEND> [--slippage-bps=300]` — exact-input CROSS -> token swap
+- `buy-exact <SYMBOL> <TOKEN_AMOUNT> [--slippage-bps=300]` — exact-output token buy with max CROSS input
+- `sell <SYMBOL> <TOKEN_AMOUNT> [--slippage-bps=300]` — exact-input token -> CROSS swap; auto-approves router if needed
+- `quote-deposit <SYMBOL> <CROSS_AMOUNT> [--slippage-bps=300]` — quote token needed and expected LP tokens for adding liquidity
+- `deposit <SYMBOL> <CROSS_AMOUNT> [--slippage-bps=300]` — add token+CROSS liquidity from a CROSS amount; auto-approves token if needed
+- `quote-deposit-token <SYMBOL> <TOKEN_AMOUNT> [--slippage-bps=300]` — quote CROSS needed and expected LP tokens for adding liquidity from a token amount
+- `deposit-token <SYMBOL> <TOKEN_AMOUNT> [--slippage-bps=300]` — add token+CROSS liquidity from a token amount; auto-approves token if needed
+- `quote-withdraw <SYMBOL> <LP_AMOUNT|all> [--slippage-bps=300]` — quote token+CROSS outputs for removing liquidity
+- `withdraw <SYMBOL> <LP_AMOUNT|all> [--slippage-bps=300]` — remove liquidity; auto-approves LP token if needed
 
 Examples:
+
 ```bash
-set -a; source "$HOME/.claude/skills/cross-dex-trade/.env"; set +a
-node scripts/trade.mjs buy RUBYx 0.128 31
-node scripts/trade.mjs market-buy CROMx 5
+node scripts/trade.mjs tokens --query=RUBY
+node scripts/trade.mjs token-info SHILTZx --history=5 --candles=12 --tick=1h
+node scripts/trade.mjs token-info all --limit=20
+node scripts/trade.mjs pairs
+node scripts/trade.mjs quote buy RUBYx 1
+node scripts/trade.mjs buy RUBYx 1 --slippage-bps=300
+node scripts/trade.mjs buy-exact RUBYx 10 --slippage-bps=300
+node scripts/trade.mjs sell RUBYx 10 --slippage-bps=300
+node scripts/trade.mjs quote-deposit RUBYx 1
+node scripts/trade.mjs deposit RUBYx 1 --slippage-bps=300
+node scripts/trade.mjs quote-deposit-token SHILTZx 20
+node scripts/trade.mjs deposit-token SHILTZx 20 --slippage-bps=300
+node scripts/trade.mjs quote-withdraw RUBYx 1
+node scripts/trade.mjs withdraw RUBYx 1 --slippage-bps=300
 ```
 
-**Pick limit vs market by user intent.** Phrases like "buy N <SYMBOL> at <PRICE>" or a stated bid price → `buy`. Phrases like "buy <CROSS_AMOUNT> CROSS worth of <SYMBOL>" or "spend X CROSS on …" → `market-buy`. Never assume a limit price for the user.
-
-**Always read `fill.fillState` before declaring success.** A `status: "success"` receipt with `fillState: "open"` means the order is sitting in the book (price below ask / above bid) and the wallet's token balance is unchanged — surface it explicitly and ask whether to cancel or wait.
-
-### Mode B — Dispatch via OpenClaw
-Use only if the user explicitly says "openclaw로 / via openclaw / let openclaw do it". OpenClaw doesn't natively know CROSS DEX semantics, so we have it shell out to the same script.
-
-1. Stage a workspace dir: `mkdir -p "$HOME/.openclaw/workspaces/cross-dex" && cp "$HOME/.claude/skills/cross-dex-trade/assets/SOUL.template.md" "$HOME/.openclaw/workspaces/cross-dex/SOUL.md"`
-2. Write the resolved env to `"$HOME/.openclaw/workspaces/cross-dex/.env"` (chmod 600). If you got the PK from an existing `.env`, prefer symlinking instead of copying.
-3. Invoke openclaw with the user's intent rendered into a concrete shell command:
-   ```bash
-   cd "$HOME/.openclaw/workspaces/cross-dex"
-   openclaw agent --message "Run this trade and report the JSON output verbatim: bash -lc 'set -a; source .env; set +a; node $HOME/.claude/skills/cross-dex-trade/scripts/trade.mjs buy RUBYx 0.128 31'"
-   ```
-4. Capture stdout, parse the JSON envelope (`txHash`, `status`, `explorer`), report to the user.
+Intent mapping:
+- "1 CROSS어치 RUBYx 사줘" -> `buy RUBYx 1`
+- "SHILTZx가 무슨 게임 토큰인지 알려줘" -> `token-info SHILTZx`
+- "GameToken 전체 상세 목록 보여줘" -> `token-info all`
+- "SHILTZx 최근 거래랑 차트 조회해줘" -> `token-info SHILTZx --history=10 --candles=24 --tick=1h`
+- "RUBYx 10개 사줘" -> first `quote buy-exact RUBYx 10`, then after confirmation `buy-exact RUBYx 10`
+- "RUBYx 10개 팔아줘" -> `sell RUBYx 10`
+- "RUBYx 풀에 CROSS 1개 예치해줘" -> first `quote-deposit RUBYx 1`, then after confirmation `deposit RUBYx 1`
+- "SHILTZx 20개를 풀에 예치해줘" -> first `quote-deposit-token SHILTZx 20`, then after confirmation `deposit-token SHILTZx 20`
+- "RUBYx LP 1개 인출해줘" -> first `quote-withdraw RUBYx 1`, then after confirmation `withdraw RUBYx 1`
+- "RUBYx LP 전부 인출해줘" -> `withdraw RUBYx all`
+- "0.128 CROSS에 RUBYx 지정가 매수" -> unsupported; ask whether to do a swap quote instead
 
 ---
 
-## 6. Reporting back
+## 6. Reporting
 
-After every trade, surface to the user:
-- The parsed intent (so they can audit it)
-- `txHash` and the explorer link `https://explorer.crosstoken.io/612055/tx/<hash>`
-- Receipt status (`success` / `reverted`)
-- **The `fill` block** — for `buy`/`market-buy` always echo `fillState` and `filledTokens`; flag `open` and `partial` results explicitly. For `sell`, echo `tokensTransferredOut` and `nativeReceivedNetCROSS` along with the note about disambiguation.
-- A reminder of the wallet address used (last 6 chars)
+After a quote, report:
+- side, symbol, input amount, output amount
+- price and `priceImpact`
+- pair address if useful
 
-Three states the user cares about that should never be conflated:
-1. **Wallet token balance** (what they actually own now)
-2. **DEX order/fill state** (`fillState` from the trade response — open / partial / filled / reverted)
-3. **Downstream effects** (e.g. Cross Points deposit) — these belong to other skills, not this one
+After token info, report:
+- token symbol, contract, game name, genre, developer, publisher, platforms, release year, website
+- current price in CROSS and USD, 24h change, total supply, liquidity, 24h buy/sell volume, holders
+- recent swap/liquidity/candle rows only if the user asked for them
 
-Never include the PK or full env contents in the report.
+After a trade, report:
+- parsed intent
+- `txHash` and explorer URL
+- receipt status
+- slippage bps and min/max bound used
+- balance diff: CROSS, token, gas
+- for liquidity actions, LP token diff and quoted token+CROSS min amounts
+- wallet suffix only; never include secrets
+
+No fill/open/partial wording. A successful swap either changes balances or reverts; there are no resting orders.
 
 ---
 
-## 7. Distribution
+## 7. OpenClaw Mode
 
-This skill folder is the unit of distribution. Recipients:
-1. Copy the whole `cross-dex-trade/` folder into `~/.claude/skills/`
-2. Run `cd ~/.claude/skills/cross-dex-trade && npm install` once (or let the skill do it on first use)
-3. Either create `~/.claude/skills/cross-dex-trade/.env` from `.env.example`, or let the skill prompt them on first run
-4. Optionally `cp assets/SOUL.template.md ~/.openclaw/workspaces/cross-dex/SOUL.md` to enable Mode B
+Use only if explicitly requested. OpenClaw should shell out to the same script and only run whitelisted subcommands:
 
-For deeper details (chain config, DEX addresses, function selectors, calldata layout) read `references/cross-chain.md` only when needed — it stays out of context otherwise.
+```bash
+cd "$HOME/.openclaw/workspaces/cross-dex"
+openclaw agent --message "Run this swap and report JSON verbatim: bash -lc 'set -a; source .env; set +a; node $HOME/.claude/skills/cross-dex-trade/scripts/trade.mjs buy RUBYx 1 --slippage-bps=300'"
+```
+
+---
+
+## 8. Reference
+
+For chain, API, router, and ABI details, read `references/cross-chain.md` only when needed.
+
+## 9. Maintainer Verification
+
+After changing API paths, router addresses, quote handling, or command docs, run:
+
+```bash
+npm test
+```
+
+This smoke test signs nothing. It verifies `tokens`, `token-info`, `pairs`, `quote buy`, `quote buy-exact`, `quote sell`, `quote-deposit`, `quote-withdraw`, router calldata selectors, and removal of legacy orderbook command names from `SKILL.md`.
